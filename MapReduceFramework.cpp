@@ -1,11 +1,15 @@
 #include <iostream>
 #include "MapReduceFramework.h"
 #include <atomic>
-
+#include "SampleClient/SampleClient.cpp"
 #define SYS_ERR "system error: "
 
 typedef struct
 {
+    const MapReduceClient* client;
+    const InputVec* inputVec;
+    OutputVec& outputVec;
+    IntermediateVec intermediateVec;
     std::atomic<uint64_t>* data; // stage, work_did, work_all
     int multiThreadLevel;
     std::atomic<int>* assignInput;
@@ -16,8 +20,25 @@ typedef struct
 
 void getJobState(JobHandle job, JobState* state) //TODO add semaphore?
 {
-    // lamaaaaaaaa
-    return;
+    // Change state and change percentage
+    std::atomic<uint64_t>*data = ((JobContext*) job)->data;
+    uint64_t num = ((static_cast<int>(state->stage) << 63) | (~(3 << 63)));
+    (*(data)) = ((*(data))|(3 << 63)) & (num);
+}
+
+void* thread_func(void* arg) {
+    // Critical Section
+    auto* jc = static_cast<JobContext*>(arg);
+    while (*(jc->assignInput) < (*(jc->inputVec)).size())
+    {
+        int old_value = (*(jc->assignInput))++;
+        if (*(jc->assignInput) < (*(jc->inputVec)).size())
+        {
+            jc->client->map((*(jc->inputVec))[old_value].first, (*(jc->inputVec))[old_value].second, jc);
+        }
+    }
+    // Todo barrier or continue sort?
+    pthread_exit(NULL);
 }
 
 JobHandle startMapReduceJob(const MapReduceClient& client,
@@ -62,7 +83,10 @@ JobHandle startMapReduceJob(const MapReduceClient& client,
 
 }
 
-void emit2 (K2* key, V2* value, void* context);
+void emit2 (K2* key, V2* value, void* context)
+{
+
+}
 void emit3 (K3* key, V3* value, void* context);
 
 
