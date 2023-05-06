@@ -27,9 +27,10 @@ JobHandle startMapReduceJob(const MapReduceClient& client,
     std::atomic<uint64_t> data(0);
     std::atomic<long> assign_input(0);
     JobContext jobHandler = (JobContext) {&data, multiThreadLevel, &assign_input};
-
+    JobHandle a = &jobHandler;
+    JobState job_state= (JobState) {MAP_STAGE, 0};
     // Map Phase -
-    getJobState((static_cast<void*> (&jobHandler)), (JobState) {MAP_STAGE, 0});
+    getJobState(a, &job_state);
 
 
 }
@@ -40,7 +41,6 @@ void emit3 (K3* key, V3* value, void* context);
 
 
 void waitForJob(JobHandle job);
-void getJobState(JobHandle job, JobState* state);
 void closeJobHandle(JobHandle job);
 
 //int main() {
