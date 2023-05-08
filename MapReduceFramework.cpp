@@ -1,7 +1,8 @@
 #include <iostream>
 #include "MapReduceFramework.h"
 #include <atomic>
-#include "SampleClient/SampleClient.cpp"
+#include <algorithm>
+#include "Barrier.h"
 #define SYS_ERR "system error: "
 #define JOB_SIZE 4611686016279904256UL
 #define JOB_STATE 13835058055282163712UL
@@ -12,7 +13,8 @@ class JobContext {
 public:
     const MapReduceClient* client;
     const InputVec* inputVec;
-    OutputVec& outputVec;
+    OutputVec* outputVec;
+    Barrier* barrier;
     IntermediateVec intermediateVec;
     std::atomic<uint64_t>* data; // stage, work_did, work_all
     int multiThreadLevel;
@@ -22,26 +24,74 @@ public:
 };
 
 
-void getJobState(JobHandle job, JobState* state) //TODO add semaphore?
+void updateJobSize(std::atomic<uint64_t>* data, unsigned long size)
 {
-    // Change state and change percentage
-    std::atomic<uint64_t>*data = ((JobContext*) job)->data;
-    uint64_t num = ((static_cast<int>(state->stage) << 63) | (~(3 << 63)));
-    (*(data)) = ((*(data))|(3 << 63)) & (num);
+    uint64_t num1 = 0 | (size << 31);
+    (*(data)) = (data->load() & ~(JOB_SIZE)) | (num1);
 }
 
-void* thread_func(void* arg) {
-    // Critical Section
-    auto* jc = static_cast<JobContext*>(arg);
-    while (*(jc->assignInput) < (*(jc->inputVec)).size())
+void updateJobProgress(std::atomic<uint64_t>* data)
+{
+    (*(data))++;
+}
+void setJobState(JobHandle job, stage_t stage)
+{
+    // Change state and make everything else 0
+    std::atomic<uint64_t>*data = ((JobContext*) job)->data;
+    (*(data)) = ((static_cast<unsigned long>(stage) << 62));
+}
+
+void getJobState(JobHandle job, JobState* state)
+{
+    // Change state and change percentage
+    auto* jc = static_cast<JobContext*>(job);
+    const unsigned long cur_data = jc->data->load();
+    state->stage = (stage_t) ((cur_data & JOB_STATE) >> 62);
+    state->percentage = 100*((float)(cur_data & JOB_PROGRESS)
+            / (float)((cur_data & JOB_SIZE) >> 31));
+}
+
+void mapPhase(void* context)
+{
+    // Map Phase -- Critical Section
+    auto* jc = static_cast<JobContext*>(context);
+    unsigned long inputVecSize = (*(jc->inputVec)).size();
+    while (*(jc->assignInput) < inputVecSize)
     {
-        int old_value = (*(jc->assignInput))++;
-        if (*(jc->assignInput) < (*(jc->inputVec)).size())
+        int old_value = (*(jc->assignInput))++; // old value will always be unique
+        if (old_value < inputVecSize) // in case old_value bigger than inputVecSize
         {
-            jc->client->map((*(jc->inputVec))[old_value].first, (*(jc->inputVec))[old_value].second, jc);
+            // Give a map job to a thread, using old_value
+            jc->client->map((*(jc->inputVec))[old_value].first,
+                            (*(jc->inputVec))[old_value].second, jc);
+            (*(jc->data))++;
         }
     }
-    // Todo barrier or continue sort?
+}
+
+void sortPhase(void* context) // TODO first letter is not sorted
+{
+    auto* jc = static_cast<JobContext*>(context);
+    std::sort(jc->intermediateVec.begin(),jc->intermediateVec.end());
+}
+
+void shufflePhase(void* context)
+{
+    auto* jc = static_cast<JobContext*>(context);
+    jc->barrier->barrier(); // Wait for everyone - so all threads are organized
+
+    // Mutex - Shuffle
+
+
+}
+
+void* thread_entry(void* context) {
+    mapPhase(context);
+    sortPhase(context);
+
+    shufflePhase(context);// Todo barrier
+
+
     pthread_exit(NULL);
 }
 
@@ -50,18 +100,16 @@ JobHandle startMapReduceJob(const MapReduceClient& client,
                             int multiThreadLevel)
 {
     // Initialize - Undefined
-    std::atomic<uint64_t> data(0);
-    std::atomic<int> assign_input(0);
-    auto* threads = static_cast<pthread_t *>(malloc(sizeof(pthread_t) * multiThreadLevel));
+    auto* data = static_cast<std::atomic<uint64_t> *>(malloc(sizeof(std::atomic<uint64_t>))); // state (2), work_did (31), work_all (31)
+    *data = 0;
+    auto* assign_input = static_cast<std::atomic<int> *>(malloc(sizeof(std::atomic<int>)));
+    *assign_input = 0;
+    auto* threads = static_cast<pthread_t*>(malloc(sizeof(pthread_t) * multiThreadLevel));
     auto* contexts = static_cast<JobContext*>(malloc(sizeof(JobContext) * multiThreadLevel));
-//    JobContext jobHandler = (JobContext) {client, inputVec, outputVec,
-//                                          &data, multiThreadLevel,
-//                                          &assign_input, threads};
-    JobState job_state = (JobState) {MAP_STAGE, 0};
-
-
+    auto* barrier =(Barrier*) malloc(sizeof(Barrier));
+    *barrier = Barrier(multiThreadLevel);
+    // TODO do we need to create min(multiThreadLevel, inputVecSize)?
     // Make threads
-//    getJobState(&jobHandler, &job_state);
     for (int i = 0; i < multiThreadLevel; ++i)
     {
         contexts[i] = ((JobContext) {&client, &inputVec, &outputVec, barrier,
@@ -70,22 +118,27 @@ JobHandle startMapReduceJob(const MapReduceClient& client,
                                      threads, i});
     }
 
+    // Beginning Map Phase
+    setJobState((void*)contexts, MAP_STAGE);
+    updateJobSize(contexts[0].data, inputVec.size());
+
     for (int i = 0; i < multiThreadLevel; ++i)
     {
         pthread_create(threads + i, nullptr, thread_entry, (void *) (contexts + i));
     }
-
-    // Map Phase -
-
-//    client.map(K1, V1, void*);
-
+    return (void*) contexts;
 }
 
 void emit2 (K2* key, V2* value, void* context)
 {
+    auto* jc = static_cast<JobContext*>(context);
+    jc->intermediateVec.emplace_back(key,value); // Saves the intermediary element in the context data structures
+     // update the number of intermediary elements using atomic counter
+}
+void emit3 (K3* key, V3* value, void* context)
+{
 
 }
-void emit3 (K3* key, V3* value, void* context);
 
 
 
@@ -101,7 +154,3 @@ void closeJobHandle(JobHandle job)
     }
 }
 
-//int main() {
-//    std::cout << "Hello, World!" << std::endl;
-//    return 0;
-//}
