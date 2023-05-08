@@ -3,9 +3,13 @@
 #include <atomic>
 #include "SampleClient/SampleClient.cpp"
 #define SYS_ERR "system error: "
+#define JOB_SIZE 4611686016279904256UL
+#define JOB_STATE 13835058055282163712UL
+#define JOB_PROGRESS 2147483647UL
 
-typedef struct
-{
+class JobContext {
+
+public:
     const MapReduceClient* client;
     const InputVec* inputVec;
     OutputVec& outputVec;
@@ -14,8 +18,8 @@ typedef struct
     int multiThreadLevel;
     std::atomic<int>* assignInput;
     pthread_t* threads;
-
-}JobContext;
+    int thread_id; // TODO delete
+};
 
 
 void getJobState(JobHandle job, JobState* state) //TODO add semaphore?
@@ -60,21 +64,15 @@ JobHandle startMapReduceJob(const MapReduceClient& client,
 //    getJobState(&jobHandler, &job_state);
     for (int i = 0; i < multiThreadLevel; ++i)
     {
-        auto a = (KChar)i;
-        auto b = (VCount)i;
-        auto d = IntermediateVec();
-        d.push_back(IntermediatePair(&a, &b));
-        JobContext jobHandler = (JobContext) {&client, &inputVec, outputVec,
-                                              d,
-                                          &data, multiThreadLevel,
-                                          &assign_input, threads};
-
-        contexts[i] = jobHandler;
+        contexts[i] = ((JobContext) {&client, &inputVec, &outputVec, barrier,
+                                     std::move(IntermediateVec()), data,
+                                     multiThreadLevel,assign_input,
+                                     threads, i});
     }
 
     for (int i = 0; i < multiThreadLevel; ++i)
     {
-        pthread_create(threads + i, nullptr, thread_func, (void*)(contexts+i));
+        pthread_create(threads + i, nullptr, thread_entry, (void *) (contexts + i));
     }
 
     // Map Phase -
@@ -91,8 +89,17 @@ void emit3 (K3* key, V3* value, void* context);
 
 
 
-void waitForJob(JobHandle job);
-void closeJobHandle(JobHandle job);
+void waitForJob(JobHandle job)
+{
+
+}
+void closeJobHandle(JobHandle job)
+{
+    auto* jc = static_cast<JobContext*>(job);
+    for (int i = 0; i < jc->multiThreadLevel; ++i) {
+        pthread_join((jc->threads)[i], NULL);
+    }
+}
 
 //int main() {
 //    std::cout << "Hello, World!" << std::endl;
