@@ -100,7 +100,19 @@ void* threadEntryPoint(void* context) {
     mapPhase(context);
     sortPhase(context);
     jc->barrier->barrier();
-    shufflePhase(context);// Todo barrier
+
+    // Only one thread can enter this block at a time
+    pthread_mutex_lock(jc->shuffle_mutex);
+    if (!(*(jc->shuffled))) {
+        std::cout << "Certain Job: Thread ID - " << jc->thread_id << std::endl;
+        fflush(stdout);
+        // Perform shuffle
+        shufflePhase(context);
+        (*(jc->shuffled)) = true;
+        pthread_mutex_unlock(jc->shuffle_mutex);
+        pthread_mutex_destroy(jc->shuffle_mutex); // TODO can cause bug?
+    }
+    reducePhase(context);
 
 
     pthread_exit(NULL);
@@ -151,7 +163,6 @@ void emit3 (K3* key, V3* value, void* context)
 {
 
 }
-
 
 
 void waitForJob(JobHandle job)
