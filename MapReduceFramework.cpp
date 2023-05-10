@@ -3,10 +3,14 @@
 #include <atomic>
 #include <algorithm>
 #include "Barrier.h"
+
+
 #define SYS_ERR "system error: "
 #define JOB_SIZE 4611686016279904256UL
 #define JOB_STATE 13835058055282163712UL
 #define JOB_PROGRESS 2147483647UL
+
+
 
 class JobContext {
 
@@ -69,26 +73,33 @@ void mapPhase(void* context)
     }
 }
 
+bool compareIntermediatePairs(const IntermediatePair& pair1,
+                              const IntermediatePair& pair2)
+{
+  return (*(pair1.first)) < (*(pair2.first));
+}
+
 void sortPhase(void* context) // TODO first letter is not sorted
 {
     auto* jc = static_cast<JobContext*>(context);
-    std::sort(jc->intermediateVec.begin(),jc->intermediateVec.end());
+    std::sort(jc->intermediateVec.begin(),jc->intermediateVec.end(),
+              compareIntermediatePairs);
 }
 
 void shufflePhase(void* context)
 {
     auto* jc = static_cast<JobContext*>(context);
     jc->barrier->barrier(); // Wait for everyone - so all threads are organized
-
     // Mutex - Shuffle
 
 
 }
 
-void* thread_entry(void* context) {
+void* threadEntryPoint(void* context) {
+    auto* jc = static_cast<JobContext*>(context);
     mapPhase(context);
     sortPhase(context);
-
+    jc->barrier->barrier();
     shufflePhase(context);// Todo barrier
 
 
@@ -124,7 +135,8 @@ JobHandle startMapReduceJob(const MapReduceClient& client,
 
     for (int i = 0; i < multiThreadLevel; ++i)
     {
-        pthread_create(threads + i, nullptr, thread_entry, (void *) (contexts + i));
+      pthread_create (
+          threads + i, nullptr, threadEntryPoint, (void *) (contexts + i));
     }
     return (void*) contexts;
 }
