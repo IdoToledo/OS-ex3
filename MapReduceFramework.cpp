@@ -60,7 +60,7 @@ void updateJobProgress(std::atomic<uint64_t>* data)
 void setJobState(JobHandle job, stage_t stage)
 {
     // Change state and make everything else 0
-    std::atomic<uint64_t>*data = ((JobContext*) job)->data;
+    std::atomic<uint64_t>*data = (((JobContext*) job)->sjc)->data;
     (*(data)) = ((static_cast<unsigned long>(stage) << 62));
 }
 
@@ -68,7 +68,7 @@ void getJobState(JobHandle job, JobState* state)
 {
     // Change state and change percentage
     auto* jc = static_cast<JobContext*>(job);
-    const unsigned long cur_data = jc->data->load();
+    const unsigned long cur_data = jc->sjc->data->load();
     state->stage = (stage_t) ((cur_data & JOB_STATE) >> 62);
     state->percentage = 100*((float)(cur_data & JOB_PROGRESS)
             / (float)((cur_data & JOB_SIZE) >> 31));
@@ -79,15 +79,15 @@ void mapPhase(void* context)
     // Map Phase -- Critical Section
     auto* jc = static_cast<JobContext*>(context);
     unsigned long inputVecSize = (*(jc->inputVec)).size();
-    while (*(jc->assignInput) < inputVecSize)
+    while (*(jc->sjc->assignInput) < inputVecSize)
     {
-        int old_value = (*(jc->assignInput))++; // old value will always be unique
+        int old_value = (*(jc->sjc->assignInput))++; // old value will always be unique
         if (old_value < inputVecSize) // in case old_value bigger than inputVecSize
         {
             // Give a map job to a thread, using old_value
             jc->client->map((*(jc->inputVec))[old_value].first,
                             (*(jc->inputVec))[old_value].second, jc);
-            (*(jc->data))++;
+            (*(jc->sjc->data))++;
         }
     }
 }
@@ -109,17 +109,17 @@ void reducePhase(void* context)
 {
     auto* jc = static_cast<JobContext*>(context);
     IntermediateVec working_vec;
-    while (!jc->shuffleVec->empty())
+    while (!jc->sjc->shuffleVec->empty())
     {
         // Popping the last vec
-        pthread_mutex_lock(jc->reduce_mutex);
-        if (jc->shuffleVec->empty()) // Just one at a time so ok
+        pthread_mutex_lock(&(jc->sjc->reduce_mutex));
+        if (jc->sjc->shuffleVec->empty()) // Just one at a time so ok
         {
             return;
         }
-        working_vec = jc->shuffleVec->back();
-        jc->shuffleVec->pop_back();
-        pthread_mutex_unlock(jc->reduce_mutex);
+        working_vec = jc->sjc->shuffleVec->back();
+        jc->sjc->shuffleVec->pop_back();
+        pthread_mutex_unlock(&(jc->sjc->reduce_mutex));
 
         jc->client->reduce(&working_vec, context); // Calls emit3
 
@@ -132,9 +132,9 @@ void findInterPair(JobContext* jc, IntermediatePair& interPair, int& thread)
 {
     for(int j = 0; j < jc->multiThreadLevel; j++)
     {
-        if (!(jc->threads_context[j]).intermediateVec.empty())
+        if (!(jc->sjc->threads_context[j]).intermediateVec.empty())
         {
-            interPair = (jc->threads_context[j]).intermediateVec[(jc->threads_context[j]).intermediateVec.size()-1];
+            interPair = (jc->sjc->threads_context[j]).intermediateVec[(jc->sjc->threads_context[j]).intermediateVec.size()-1];
             thread = j;
             return;
         }
@@ -145,10 +145,10 @@ void findBiggestPair(JobContext* jc, IntermediatePair& biggest_pair, int& bigges
 {
     for(int j = 0; j < jc->multiThreadLevel; j++)
     {
-        if (!(jc->threads_context[j]).intermediateVec.empty())
+        if (!(jc->sjc->threads_context[j]).intermediateVec.empty())
         {
-            IntermediatePair cur_pair = (jc->threads_context[j]).intermediateVec[
-                    (jc->threads_context[j]).intermediateVec.size() - 1];
+            IntermediatePair cur_pair = (jc->sjc->threads_context[j]).intermediateVec[
+                    (jc->sjc->threads_context[j]).intermediateVec.size() - 1];
 
             if (compareIntermediatePairs(biggest_pair, cur_pair)) {
                 biggest_pair = cur_pair;
@@ -160,14 +160,14 @@ void findBiggestPair(JobContext* jc, IntermediatePair& biggest_pair, int& bigges
 
 void addToShuffleVec(JobContext* jc, IntermediatePair& biggest_pair, int& num_of_vec)
 {
-    if (jc->shuffleVec->empty() || compareIntermediatePairs(biggest_pair, jc->shuffleVec->back().back()))
+    if (jc->sjc->shuffleVec->empty() || compareIntermediatePairs(biggest_pair, jc->sjc->shuffleVec->back().back()))
     {
-        jc->shuffleVec->push_back(IntermediateVec({biggest_pair}));
+        jc->sjc->shuffleVec->push_back(IntermediateVec({biggest_pair}));
         num_of_vec++;
     }
     else
     {
-        jc->shuffleVec->back().push_back(biggest_pair);
+        jc->sjc->shuffleVec->back().push_back(biggest_pair);
     }
 }
 
@@ -179,9 +179,9 @@ void shufflePhase(void* context)
     unsigned int num_of_intermediate_pairs = 0;
     for (int i = 0; i < jc->multiThreadLevel; i++) // Count the amount of intermediate pairs
     {
-        num_of_intermediate_pairs += (jc->threads_context[i]).intermediateVec.size();
+        num_of_intermediate_pairs += (jc->sjc->threads_context[i]).intermediateVec.size();
     }
-    updateJobSize(jc->data, num_of_intermediate_pairs);
+    updateJobSize(jc->sjc->data, num_of_intermediate_pairs);
 
     int num_of_vec = 0;
     IntermediatePair biggest_pair;
@@ -194,13 +194,13 @@ void shufflePhase(void* context)
 
         addToShuffleVec(jc, biggest_pair, num_of_vec);
 
-        (jc->threads_context[biggest_thread]).intermediateVec.pop_back();
+        (jc->sjc->threads_context[biggest_thread]).intermediateVec.pop_back();
 
-        updateJobProgress(jc->data);
+        updateJobProgress(jc->sjc->data);
     }
 
     setJobState(context, REDUCE_STAGE);
-    updateJobSize(jc->data, num_of_vec);
+    updateJobSize(jc->sjc->data, num_of_vec);
 
 }
 
@@ -209,18 +209,18 @@ void* threadEntryPoint(void* context) {
     mapPhase(context);
     sortPhase(context);
 
-    jc->barrier->barrier();
+    jc->sjc->barrier->barrier();
 
     // Only one thread can enter this block at a time
-    pthread_mutex_lock(jc->shuffle_mutex);
-    if (!(*(jc->shuffled))) {
-        std::cout << "Certain Job: Thread ID - " << jc->thread_id << std::endl;
+    pthread_mutex_lock(&(jc->sjc->shuffle_mutex));
+    if (!(jc->sjc->shuffled)) {
+//        std::cout << "Certain Job: Thread ID - " << jc->thread_id << std::endl;
         fflush(stdout);
         // Perform shuffle
         shufflePhase(context);
-        (*(jc->shuffled)) = true;
-        pthread_mutex_unlock(jc->shuffle_mutex);
-        pthread_mutex_destroy(jc->shuffle_mutex); // TODO can cause bug?
+        (jc->sjc->shuffled) = true;
+        pthread_mutex_unlock(&(jc->sjc->shuffle_mutex));
+        pthread_mutex_destroy(&(jc->sjc->shuffle_mutex)); // TODO can cause bug?
     }
     reducePhase(context);
 
@@ -232,22 +232,9 @@ JobHandle startMapReduceJob(const MapReduceClient& client,
                             const InputVec& inputVec, OutputVec& outputVec,
                             int multiThreadLevel)
 {
-    // Initialize - Undefined
-    auto* data = static_cast<std::atomic<uint64_t> *>(malloc(sizeof(std::atomic<uint64_t>))); // state (2), work_did (31), work_all (31)
-    *data = 0;
-    auto* assign_input = static_cast<std::atomic<int> *>(malloc(sizeof(std::atomic<int>)));
-    *assign_input = 0;
-    auto* threads = static_cast<pthread_t*>(malloc(sizeof(pthread_t) * multiThreadLevel));
-    auto* contexts = static_cast<JobContext*>(malloc(sizeof(JobContext) * multiThreadLevel));
-    auto* barrier =(Barrier*) malloc(sizeof(Barrier));
-    *barrier = Barrier(multiThreadLevel);
-    auto* shuffle_mutex = new pthread_mutex_t();
-    auto* reduce_mutex = new pthread_mutex_t();
-    auto* output_mutex = new pthread_mutex_t();
-    std::shared_ptr<bool> shuffled = std::make_shared<bool>(false);
-    auto* shuffleVec = new ShuffleVec();
-    // TODO do we need to create min(multiThreadLevel, inputVecSize)?
     // Make threads
+    auto* sjc = new SharedJobContext(multiThreadLevel);
+    auto* contexts = sjc->threads_context;
     for (int i = 0; i < multiThreadLevel; ++i)
     {
         contexts[i] = ((JobContext) {&client, &inputVec, &outputVec, barrier,
@@ -258,7 +245,7 @@ JobHandle startMapReduceJob(const MapReduceClient& client,
 
     // Beginning Map Phase
     setJobState((void*)contexts, MAP_STAGE);
-    updateJobSize(contexts[0].data, inputVec.size());
+    updateJobSize(contexts[0].sjc->data, inputVec.size());
 
     for (int i = 0; i < multiThreadLevel; ++i)
     {
@@ -277,10 +264,10 @@ void emit2 (K2* key, V2* value, void* context)
 void emit3 (K3* key, V3* value, void* context)
 {
     auto* jc = static_cast<JobContext*>(context);
-    pthread_mutex_lock(jc->output_mutex);
+    pthread_mutex_lock(&(jc->sjc->output_mutex));
     jc->outputVec->emplace_back(key, value);
-    updateJobProgress(jc->data);
-    pthread_mutex_unlock(jc->output_mutex);
+    updateJobProgress(jc->sjc->data);
+    pthread_mutex_unlock(&(jc->sjc->output_mutex));
 
 }
 
@@ -292,6 +279,8 @@ void waitForJob(JobHandle job)
         pthread_join((jc->threads)[i], nullptr);
     }
 }
+
+// We can assume it will be called only once
 void closeJobHandle(JobHandle job)
 {
     auto* jc = static_cast<JobContext*>(job);
