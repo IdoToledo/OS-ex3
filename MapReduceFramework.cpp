@@ -14,26 +14,23 @@
 
 typedef std::vector<std::vector<IntermediatePair>> ShuffleVec;
 
+class SharedJobContext;
 
 class JobContext {
 
 public:
+    // Don't Delete!
     const MapReduceClient* client;
     const InputVec* inputVec;
     OutputVec* outputVec;
-    Barrier* barrier;
+
+    // Shared pointers - and dont delete here
+    SharedJobContext* sjc;
+
+    // Unique data members
     IntermediateVec intermediateVec;
-    std::atomic<uint64_t>* data; // stage, work_did, work_all
     int multiThreadLevel;
-    std::atomic<int>* assignInput;
-    pthread_t* threads;
-    JobContext* threads_context;
-    int thread_id; // TODO delete
-    pthread_mutex_t* shuffle_mutex;
-    std::shared_ptr<bool> shuffled;
-    ShuffleVec* shuffleVec;
-    pthread_mutex_t* reduce_mutex;
-    pthread_mutex_t* output_mutex;
+
 //    JobContext(const MapReduceClient* client,
 //               const InputVec* inputVec,
 //               OutputVec* outputVec) : client(client), inputVec(inputVec),
@@ -43,8 +40,66 @@ public:
 //               }
 //    ~JobContext()
 //    {
+//
 //    }
 };
+
+
+class SharedJobContext
+        {
+        public:
+    explicit SharedJobContext(int multiThreadLevel)
+    {
+        data = static_cast<std::atomic<uint64_t> *>(malloc(sizeof(std::atomic<uint64_t>))); // state (2), work_did (31), work_all (31)
+        *data = 0;
+        assignInput = static_cast<std::atomic<int> *>(malloc(sizeof(std::atomic<int>)));
+        *assignInput = 0;
+        threads = new pthread_t[multiThreadLevel];
+         threads_context = new JobContext[multiThreadLevel];
+//        threads_context = new JobContext[multiThreadLevel];
+        barrier = new Barrier(multiThreadLevel);
+        shuffleVec = new ShuffleVec();
+        shuffled = false;
+        waiting = false;
+    }
+
+            // Shared pointers
+            Barrier* barrier;
+            std::atomic<uint64_t>* data; // stage, work_done, total_work
+            std::atomic<int>* assignInput;
+            pthread_t* threads;
+            JobContext* threads_context;
+            pthread_mutex_t shuffle_mutex;
+            bool shuffled;
+            ShuffleVec* shuffleVec;
+            pthread_mutex_t reduce_mutex;
+            pthread_mutex_t output_mutex;
+            bool waiting;
+
+            ~SharedJobContext()
+        {
+            delete barrier;
+            delete data;
+            delete assignInput;
+            delete[] threads;
+            delete[] threads_context;
+            if (pthread_mutex_destroy(&shuffle_mutex) != 0) {
+                fprintf(stderr, "system error: [[SharedJobContext]] error on pthread_mutex_destroy\n");
+                exit(1);
+            }
+            delete shuffleVec;
+            if (pthread_mutex_destroy(&reduce_mutex) != 0) {
+                fprintf(stderr, "system error: [[SharedJobContext]] error on pthread_mutex_destroy\n");
+                exit(1);
+            }
+            if (pthread_mutex_destroy(&output_mutex) != 0) {
+                fprintf(stderr, "system error: [[SharedJobContext]] error on pthread_mutex_destroy\n");
+                exit(1);
+            }
+        }
+
+        };
+
 
 
 void updateJobSize(std::atomic<uint64_t>* data, unsigned long size)
@@ -223,9 +278,8 @@ void* threadEntryPoint(void* context) {
         pthread_mutex_destroy(&(jc->sjc->shuffle_mutex)); // TODO can cause bug?
     }
     reducePhase(context);
-
-
-    pthread_exit(nullptr);
+    // Terminate thread
+    return EXIT_SUCCESS;
 }
 
 JobHandle startMapReduceJob(const MapReduceClient& client,
@@ -237,10 +291,7 @@ JobHandle startMapReduceJob(const MapReduceClient& client,
     auto* contexts = sjc->threads_context;
     for (int i = 0; i < multiThreadLevel; ++i)
     {
-        contexts[i] = ((JobContext) {&client, &inputVec, &outputVec, barrier,
-                                     std::move(IntermediateVec()), data,
-                                     multiThreadLevel,assign_input,
-                                     threads,contexts, i, shuffle_mutex, shuffled, shuffleVec, reduce_mutex, output_mutex});
+        contexts[i] = ((JobContext) {&client, &inputVec, &outputVec, sjc, std::move(IntermediateVec()), multiThreadLevel});
     }
 
     // Beginning Map Phase
@@ -250,7 +301,7 @@ JobHandle startMapReduceJob(const MapReduceClient& client,
     for (int i = 0; i < multiThreadLevel; ++i)
     {
       pthread_create (
-          threads + i, nullptr, threadEntryPoint, (void *) (contexts + i));
+              (sjc->threads) + i, nullptr, threadEntryPoint, (void *) (contexts + i));
     }
     return (void*) contexts;
 }
@@ -271,12 +322,17 @@ void emit3 (K3* key, V3* value, void* context)
 
 }
 
-
+// we can assume it will be called only from one thread
 void waitForJob(JobHandle job)
 {
     auto* jc = static_cast<JobContext*>(job);
-    for (int i = 0; i < jc->multiThreadLevel; ++i) {
-        pthread_join((jc->threads)[i], nullptr);
+    if (!(jc->sjc->waiting))
+    {
+        jc->sjc->waiting = true;
+        for (int i = 0; i < jc->multiThreadLevel; ++i)
+        {
+            pthread_join((jc->sjc->threads)[i], nullptr);
+        }
     }
 }
 
@@ -285,6 +341,11 @@ void closeJobHandle(JobHandle job)
 {
     auto* jc = static_cast<JobContext*>(job);
     waitForJob(job);
-    // TODO destructor
+
+    // Delete shared pointers
+    auto* sjc = jc->sjc;
+    delete sjc;
+//    // Delete jc
+//    delete[] jc;
 }
 
