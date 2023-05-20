@@ -92,7 +92,7 @@ public:
 
 void updateJobSize(std::atomic<uint64_t> *data, unsigned long size) {
     uint64_t num1 = 0 | (size << 31);
-    (*(data)) = (data->load() & ~(JOB_SIZE)) | (num1);
+    (*(data)) = (data->load() & ~(JOB_SIZE)) | (num1); // TODO check error?
 }
 
 void updateJobProgress(std::atomic<uint64_t> *data) {
@@ -241,19 +241,23 @@ void *threadEntryPoint(void *context) {
     sortPhase(context);
 
     jc->sjc->barrier->barrier();
+//    std::cout << "Thread after Barrier " << std::endl;
+//    fflush(stdout);
 
     // Only one thread can enter this block at a time
     pthread_mutex_lock(&(jc->sjc->shuffle_mutex));
     if (!(jc->sjc->shuffled)) {
-//        std::cout << "Certain Job: Thread ID - " << jc->thread_id << std::endl;
-        fflush(stdout);
         // Perform shuffle
         shufflePhase(context);
         (jc->sjc->shuffled) = true;
-        pthread_mutex_unlock(&(jc->sjc->shuffle_mutex));
-        pthread_mutex_destroy(&(jc->sjc->shuffle_mutex)); // TODO can cause bug?
     }
+    pthread_mutex_unlock(&(jc->sjc->shuffle_mutex));
+//    std::cout << "Thread after Shuffle " << std::endl;
+//    fflush(stdout);
+
     reducePhase(context);
+//    std::cout << "Thread after Reduce " << std::endl;
+//    fflush(stdout);
     // Terminate thread
     return EXIT_SUCCESS;
 }
